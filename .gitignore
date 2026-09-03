@@ -1,0 +1,24 @@
+# ESP-IDF 构建产物
+freeclient/
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# 固件二进制文件
+*.bin
+sdcard.img
+
+# freeclient 构建产物
+freeclient/gyscan
+freeclient/*.exe
+freeclient/*.out
+
+# 第三方源码(本地整段拉取, 不纳入版本管理)
+third_party/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swl

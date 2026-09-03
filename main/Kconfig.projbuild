@@ -1,0 +1,139 @@
+menu "Blink Configuration"
+
+    choice BLINK_LED
+        prompt "Blink LED type"
+        default BLINK_LED_STRIP if IDF_TARGET_ESP32S3
+        default BLINK_LED_GPIO
+        help
+            Select the LED type: a normal level controlled GPIO LED,
+            or an addressable WS2812 (Neopixel) LED strip.
+
+        config BLINK_LED_GPIO
+            bool "GPIO"
+        config BLINK_LED_STRIP
+            bool "LED strip (WS2812)"
+    endchoice
+
+    choice BLINK_LED_STRIP_BACKEND
+        depends on BLINK_LED_STRIP
+        prompt "LED strip backend peripheral"
+        default BLINK_LED_STRIP_BACKEND_RMT if SOC_RMT_SUPPORTED
+        default BLINK_LED_STRIP_BACKEND_SPI
+        help
+            Select the backend peripheral to drive the LED strip.
+
+        config BLINK_LED_STRIP_BACKEND_RMT
+            depends on SOC_RMT_SUPPORTED
+            bool "RMT"
+        config BLINK_LED_STRIP_BACKEND_SPI
+            bool "SPI"
+    endchoice
+
+    config BLINK_GPIO
+        int "Blink GPIO number"
+        range 0 48
+        default 48
+        help
+            GPIO number (IOxx) to blink on and off the LED.
+
+            ESP32-S3-DevKitC-1 v1.0 板载 WS2812 RGB LED 位于 GPIO48；
+            v1.1 及之后版本位于 GPIO38。
+            若使用普通 GPIO LED，请按实际接线修改此值。
+
+    config BLINK_PERIOD
+        int "Blink period in ms"
+        range 10 3600000
+        default 1000
+        help
+            Blink period in milliseconds.
+
+endmenu
+
+menu "gyscan Configuration"
+
+    config GYSCAN_WIFI_SSID
+        string "WiFi SSID"
+        default "MyWiFi"
+        help
+            "连接gyscan(Go程序)" 前自动连接的 WiFi 名称。
+
+    config GYSCAN_WIFI_PASSWORD
+        string "WiFi 密码"
+        default ""
+        help
+            WiFi 密码。留空表示开放网络。
+
+    config GYSCAN_WIFI_MAX_RETRY
+        int "WiFi 连接最大重试次数"
+        range 0 10
+        default 3
+        help
+            连接失败后自动重连的最大次数。
+
+    config GYSCAN_WIFI_CONNECT_TIMEOUT_MS
+        int "WiFi 连接超时时间(毫秒)"
+        range 1000 60000
+        default 15000
+        help
+            等待获取 IP 的最大时间。
+
+    config GYSCAN_BLE_SCAN_DURATION_MS
+        int "蓝牙扫描时长(毫秒)"
+        range 1000 60000
+        default 5000
+        help
+            "蓝牙探测" 每次扫描的持续时间。
+
+    config GYSCAN_SERVER_HOST
+        string "gyscan 服务器地址(IP 或域名)"
+        default "192.168.1.100"
+        help
+            "连接gyscan(Go程序)" 要连接的服务器地址。
+
+    config GYSCAN_SERVER_PORT
+        int "gyscan 服务器端口"
+        range 1 65535
+        default 8080
+
+    config GYSCAN_CMD
+        string "连接成功后发送的命令"
+        default "scan"
+        help
+            与 Go 程序约定的命令协议，例如 "scan"。
+
+    config GYSCAN_ENABLE_USB_HID
+        bool "启用 USB HID 键盘设备"
+        default y
+        help
+            ESP32-S3 通过 USB-OTG 口模拟键盘。QEMU 等无 USB 硬件的
+            环境可关闭本选项，避免初始化报错。
+
+    config GYSCAN_TCP_PORT
+        int "远程控制 TCP 端口(后期功能，暂未启用)"
+        range 1 65535
+        default 1234
+        help
+            后期版本将在此端口提供远程控制服务器，当前版本未启用。
+
+    config GYSCAN_HTTP_PORT
+        int "HTTP 服务器端口"
+        range 1 65535
+        default 80
+        help
+            使用 curl / wget / 浏览器访问 ESP 时使用的端口，
+            访问后返回 "esp-gyscan：ok"。
+
+    config GYSCAN_CONNECT_TIMEOUT_S
+        int "TCP 连接超时(秒)"
+        range 1 30
+        default 5
+
+    config GYSCAN_RECV_TIMEOUT_S
+        int "接收数据超时(秒)"
+        range 1 60
+        default 5
+        help
+            连接建立后等待服务器响应的最长时间。
+
+endmenu
+

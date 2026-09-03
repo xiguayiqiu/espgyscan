@@ -1,0 +1,5 @@
+## 托管组件依赖
+## 构建时自动从组件仓库拉取
+dependencies:
+  espressif/led_strip: "^3.0.0"
+  espressif/esp_tinyusb: "^2.0.1~1"

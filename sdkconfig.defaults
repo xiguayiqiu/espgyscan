@@ -1,0 +1,45 @@
+# ESP32-S3 项目默认配置
+# 可通过 idf.py menuconfig 修改
+
+# 目标芯片
+CONFIG_IDF_TARGET="esp32s3"
+
+# 蓝牙 (NimBLE) - "蓝牙探测"功能需要
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+
+# 自定义分区表（扩大 app 分区）
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Flash 大小：芯片物理 16MB，按 8MB 配置烧录运行
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# TinyUSB：1 个 HID 接口（USB 键盘设备）
+CONFIG_TINYUSB_HID_COUNT=1
+
+# QEMU 以太网（OpenCores MAC，仅 QEMU 模拟器使用）。
+# 真机(ESP32-S3 无 EMAC)务必保持关闭 n，否则会访问不存在的寄存器。
+# QEMU 联网方法: idf.py menuconfig → Component config → Ethernet → Support OpenCores ... 开启
+#   CONFIG_ETH_USE_OPENETH=y
+# 然后 idf.py qemu 启动时需带网卡: -nic user,model=open_eth,hostfwd=tcp::1234-:1234,hostfwd=tcp::8080-:80
+# CONFIG_ETH_USE_OPENETH=y
+
+# 默认使用板载 WS2812 RGB LED
+# ESP32-S3-DevKitC-1 v1.0 使用 GPIO48，v1.1+ 使用 GPIO38
+CONFIG_BLINK_LED_STRIP=y
+CONFIG_BLINK_LED_STRIP_BACKEND_RMT=y
+CONFIG_BLINK_GPIO=48
+CONFIG_BLINK_PERIOD=1000
+
+# ---- gyscan 服务器 / WiFi 配置（按需修改）----
+# CONFIG_GYSCAN_WIFI_SSID="MyWiFi"
+# CONFIG_GYSCAN_WIFI_PASSWORD=""
+# CONFIG_GYSCAN_SERVER_HOST="192.168.1.100"
+# CONFIG_GYSCAN_SERVER_PORT=8080
+
+# 可选：若板载 PSRAM（如 N8R8/N16R8 型号），取消注释启用
+# CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_OCT=y
+# CONFIG_SPIRAM_SPEED_80M=y
+

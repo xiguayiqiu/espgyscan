@@ -1,0 +1,56 @@
+menu "SD Card Configuration"
+
+    config GYSCAN_SDCARD_ENABLE
+        bool "Enable SD/TF card support"
+        default y
+        help
+            Enable support for an external microSD/TF card connected over SPI.
+            The card is mounted at /sdcard and can be used to store Lua scripts
+            and resources for larger capacity than the internal SPIFFS.
+
+    config GYSCAN_SDCARD_AUTO_DETECT
+        bool "开机自动探测并挂载 TF 卡"
+        depends on GYSCAN_SDCARD_ENABLE
+        default y
+        help
+            开机后在后台自动探测并挂载 TF 卡。没有安装 TF 卡模块(未接线)
+            或不需要 TF 卡时可关闭：开机将不探测、不等待，脚本/资源默认
+            全部使用内存 RAM(不写 Flash)。之后仍可在菜单中手动"挂载 TF 卡"。
+
+    config GYSCAN_SDCARD_SPI_HOST
+        int "SPI host for SD card"
+        default 2
+        range 0 3
+        help
+            Which SPI peripheral (SPI2_HOST=1 / SPI3_HOST=2) to use.
+            Common modules default to SPI2_HOST (FSPI).
+
+    config GYSCAN_SDCARD_PIN_MISO
+        int "SD card MISO GPIO"
+        default 13
+        range -1 48
+        help
+            GPIO number connected to SD card module MISO (master input).
+
+    config GYSCAN_SDCARD_PIN_MOSI
+        int "SD card MOSI GPIO"
+        default 11
+        range -1 48
+        help
+            GPIO number connected to SD card module MOSI (master output).
+
+    config GYSCAN_SDCARD_PIN_CLK
+        int "SD card CLK GPIO"
+        default 12
+        range -1 48
+        help
+            GPIO number connected to SD card module SCK/CLK.
+
+    config GYSCAN_SDCARD_PIN_CS
+        int "SD card CS GPIO"
+        default 10
+        range -1 48
+        help
+            GPIO number connected to SD card module CS (chip select).
+
+endmenu

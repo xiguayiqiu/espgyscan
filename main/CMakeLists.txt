@@ -1,0 +1,30 @@
+idf_component_register(SRCS "../src/app/espgyscan.c"
+                             "../src/ui/menu.c"
+                             "../src/ui/boot_splash.c"
+                             "../src/net/wifi_scan.c"
+                             "../src/security/ble_scan.c"
+                             "../src/net/tcp_client.c"
+                             "../src/security/hid_keyboard.c"
+                             "../src/net/http_server.c"
+                             "../src/net/tcp_server.c"
+                             "../src/storage/script_store.c"
+                             "../src/net/net_scan.c"
+                             "../src/security/arp_mitm.c"
+                             "../src/util/i18n.c"
+                             "../src/lua/lua_net.c"
+                             "../src/lua/lua_pcap.c"
+                             "../src/lua/lua_ble.c"
+                             "../src/net/eth_netif.c"
+                         EMBED_TXTFILES "data/server.crt" "data/server.key"
+                        REQUIRES sdcard esp_netif esp_wifi bt esp_eth esp_http_server spi_flash nvs_flash esp_event esp_http_client esp-tls mbedtls esp_timer espressif__tinyusb espressif__led_strip lua fatfs wear_levelling spiffs
+                        INCLUDE_DIRS "../src"
+                                    "../src/app"
+                                    "../src/ui"
+                                    "../src/net"
+                                    "../src/security"
+                                    "../src/storage"
+                                    "../src/util"
+                                    "../src/lua")
+
+# 将项目版本注入 C 代码(PROJECT_VER)，供 version 命令使用
+target_compile_definitions(${COMPONENT_LIB} PRIVATE PROJECT_VER="${PROJECT_VER}")

@@ -1,0 +1,761 @@
+/*
+ * espgyscan - ESP32-S3 边缘安全调试工具
+ *
+ * 主菜单：WiFi设置 / 蓝牙设置 / 边缘安全 / 运行Lua脚本 / TF卡设置 / 语言 / 关机
+ *   WiFi 设置: 连接/手动输入SSID/断开/网络状态
+ *   蓝牙设置:  蓝牙配对(扫描→选择→配对)
+ *   边缘安全:  WiFi探测 / 蓝牙探测 / 键盘模拟注入 / 连接gyscan(Go程序)
+ *   运行Lua脚本: 列出脚本并执行(print 实时回显)
+ *   TF 卡设置: 挂载/卸载/格式化外置 TF 卡; 切换脚本存储介质(内部Flash ↔ SD卡)
+ *
+ * 启动后：
+ *   - USB HID 键盘设备（USB 线连接电脑后即被识别为键盘）
+ *   - 自动连接 WiFi，成功后启动 HTTP 服务器（访问返回 "esp-gyscan：ok"）
+ *   - 后台 LED 闪烁作为运行状态指示
+ *
+ * 按键: WASD/方向键 移动选择器, Enter 确认, ESC 返回上级;
+ *       顶级主菜单按 ESC/q 进入"关机"确认(回车关机, ESC 继续运行)。
+ * 注: 1234 远程控制端口为后期功能，暂未启用。
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_sleep.h"
+#include "nvs_flash.h"
+#include "driver/gpio.h"
+#include "led_strip.h"
+#include "sdkconfig.h"
+
+#include "menu.h"
+#include "wifi_scan.h"
+#include "ble_scan.h"
+#include "tcp_client.h"
+#include "hid_keyboard.h"
+#include "http_server.h"
+#include "tcp_server.h"
+#include "script_store.h"
+#include "sdcard.h"
+#include "lua_rock.h"
+#include "i18n.h"
+#include "eth_netif.h"
+
+static const char *TAG = "espgyscan";
+
+#define BLINK_GPIO CONFIG_BLINK_GPIO
+
+/* ---------------- LED 状态指示灯 ---------------- */
+
+#ifdef CONFIG_BLINK_LED_STRIP
+static led_strip_handle_t led_strip;
+
+static void blink_task(void *arg)
+{
+    bool on = false;
+    while (1) {
+        if (led_strip != NULL) {
+            if (on) {
+                led_strip_set_pixel(led_strip, 0, 16, 16, 16);
+            } else {
+                led_strip_clear(led_strip);
+            }
+            led_strip_refresh(led_strip);
+        }
+        on = !on;
+        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
+    }
+}
+
+/* 初始化 LED（WS2812）；失败不崩溃，仅告警 */
+static void configure_led(void)
+{
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = BLINK_GPIO,
+        .max_leds = 1,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = false,
+    };
+    esp_err_t ret = led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip);
+    if (ret != ESP_OK) {
+        led_strip = NULL;
+        ESP_LOGW(TAG, "LED(WS2812) 初始化失败: %s，LED 功能不可用", esp_err_to_name(ret));
+        return;
+    }
+    led_strip_clear(led_strip);
+}
+
+#elif CONFIG_BLINK_LED_GPIO
+
+static void blink_task(void *arg)
+{
+    bool on = false;
+    while (1) {
+        gpio_set_level(BLINK_GPIO, on);
+        on = !on;
+        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
+    }
+}
+
+static void configure_led(void)
+{
+    gpio_reset_pin(BLINK_GPIO);
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+}
+
+#else
+static void blink_task(void *arg)
+{
+    vTaskDelete(NULL);
+}
+static void configure_led(void) {}
+#endif
+
+/* LED 初始化+闪烁放后台任务：某些平台(如 QEMU)无 RMT/LED 硬件，
+ * 后台失败不影响菜单与主流程 */
+static void led_task(void *arg)
+{
+    configure_led();
+    blink_task(NULL);   /* 内部循环，不会返回 */
+    vTaskDelete(NULL);
+}
+
+/* ---------------- 菜单动作 ---------------- */
+
+/* ---- 边缘安全 - 攻击工具 ---- */
+static void action_wifi_scan(void)    { wifi_scan_run(); }
+static void action_ble_scan(void)     { ble_scan_run(); }
+static void action_tcp_connect(void)  { tcp_client_run(); }
+
+static void action_hid_status(void)
+{
+    printf("USB 键盘: %s\n", hid_keyboard_is_mounted() ? "已连接电脑" : "未连接(等待USB枚举)");
+    printf("提示: 用 USB 线将 ESP32-S3 的 USB-OTG 口连接到电脑\n");
+    printf("      电脑会识别出一个名为 gyscan Keyboard 的键盘设备\n");
+}
+
+static void action_hid_test(void)
+{
+    if (!hid_keyboard_is_mounted()) {
+        printf("USB 键盘未连接电脑，请用 USB 线将 ESP 连接到电脑\n");
+        return;
+    }
+    printf("正在注入测试文本: hello gyscan 123\n");
+    esp_err_t r = hid_keyboard_type_text("hello gyscan 123\n");
+    if (r == ESP_OK) {
+        printf("键盘注入测试完成 (请查看电脑上焦点窗口)\n");
+    } else {
+        printf("键盘注入失败: %s\n", esp_err_to_name(r));
+    }
+}
+
+/* ---- WiFi 设置 ---- */
+static void action_wifi_connect(void)
+{
+    printf("连接目标 SSID: %s\n", wifi_get_active_ssid());
+    if (wifi_is_connected()) {
+        printf("WiFi 已连接\n");
+        return;
+    }
+    esp_err_t r = wifi_sta_connect();
+    if (r == ESP_OK) {
+        printf("WiFi 连接成功\n");
+    } else {
+        printf("WiFi 连接失败: %s\n", esp_err_to_name(r));
+    }
+}
+
+static void action_wifi_setup(void)
+{
+    char ssid[33];
+    char password[65];
+
+    printf("当前 SSID: %s\n", wifi_get_active_ssid());
+    printf("输入 WiFi 名称(SSID): ");
+    if (menu_read_line(ssid, sizeof(ssid)) < 0 || ssid[0] == '\0') {
+        printf("已取消\n");
+        return;
+    }
+    printf("输入 WiFi 密码(直接回车表示开放网络): ");
+    if (menu_read_line(password, sizeof(password)) < 0) {
+        printf("已取消\n");
+        return;
+    }
+    esp_err_t r = wifi_connect_custom(ssid, password);
+    if (r == ESP_OK) {
+        printf("已连接到 %s ✓\n", ssid);
+    } else {
+        printf("连接失败: %s (SSID/密码错误或信号差)\n", esp_err_to_name(r));
+    }
+}
+
+static void action_wifi_disconnect(void)
+{
+    esp_err_t r = wifi_disconnect();
+    if (r == ESP_OK) {
+        printf("已断开 WiFi\n");
+    } else {
+        printf("断开失败: %s\n", esp_err_to_name(r));
+    }
+}
+
+/* 获取当前可用的网络接口 IP 文本（QEMU=以太网 ETH_DEF，真机=WiFi STA）。
+ * 未取到时写入 "未连接" */
+static void get_active_ip_str(char *out, size_t out_sz)
+{
+    static const char *const keys[] = { "ETH_DEF", "WIFI_STA_DEF" };
+    esp_netif_ip_info_t ip;
+    for (int i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); i++) {
+        esp_netif_t *nif = esp_netif_get_handle_from_ifkey(keys[i]);
+        if (nif != NULL && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr != 0) {
+            snprintf(out, out_sz, IPSTR, IP2STR(&ip.ip));
+            return;
+        }
+    }
+    snprintf(out, out_sz, "%s", "未连接");
+}
+
+static void action_http_status(void)
+{
+    char ip_str[32] = "未连接";
+    get_active_ip_str(ip_str, sizeof(ip_str));
+
+    printf("WiFi 状态: %s\n", wifi_is_connected() ? "已连接" : "未连接");
+    printf("当前 SSID: %s\n", wifi_get_active_ssid());
+    printf("ESP IP: %s\n", ip_str);
+    printf("HTTP 服务器: %s (端口 %d)\n",
+           http_server_is_running() ? "运行中" : "未运行", CONFIG_GYSCAN_HTTP_PORT);
+    if (strcmp(ip_str, "未连接") != 0) {
+        printf("测试: curl http://%s/  → 返回 esp-gyscan：ok\n", ip_str);
+    }
+}
+
+static void action_tcp_status2(void)
+{
+    char ip_str[32] = "未连接";
+    get_active_ip_str(ip_str, sizeof(ip_str));
+
+    printf("gyscan 控制服务器: %s (端口 %d)\n",
+           tcp_server_is_running() ? "运行中" : "未运行", CONFIG_GYSCAN_TCP_PORT);
+    printf("当前客户端数: %d\n", tcp_server_client_count());
+    printf("ESP IP: %s\n", ip_str);
+    if (strcmp(ip_str, "未连接") != 0) {
+        printf("提示: gyscan 主程序执行: ./gyscan esp connect --cidr %s/24\n", ip_str);
+    }
+    printf("协议: hello/ls/read/write/delete/run/keymap/scan/close\n");
+}
+
+/* ---- 蓝牙设置 ---- */
+static void action_ble_pair(void) { ble_pair_run(); }
+
+/* ---- 语言 ---- */
+static void action_set_zh(void) { i18n_set_lang(LANG_ZH); }
+static void action_set_en(void) { i18n_set_lang(LANG_EN); }
+
+/* ---- 运行 Lua 脚本（SPIFFS 中已上传的 .lua） ---- */
+
+#define LUA_SCRIPT_LIST_MAX 32
+#define LUA_SCRIPT_NAME_MAX 64
+
+static char s_script_names[LUA_SCRIPT_LIST_MAX][LUA_SCRIPT_NAME_MAX];
+static int s_script_count = 0;
+
+/* script_store_list 回调：收集脚本名（只统计常规文件） */
+static void lua_script_collect(const char *name, void *ctx)
+{
+    (void)ctx;
+    if (s_script_count < LUA_SCRIPT_LIST_MAX) {
+        snprintf(s_script_names[s_script_count], LUA_SCRIPT_NAME_MAX, "%s", name);
+        s_script_count++;
+    }
+}
+
+/* 列出 /spiffs 脚本并选择编号；返回选中的下标(0 起)，取消/失败返回 -1 */
+static int menu_pick_script(void)
+{
+    s_script_count = 0;
+    esp_err_t r = script_store_list(lua_script_collect, NULL);
+    if (r != ESP_OK || s_script_count == 0) {
+        printf("\n%s\n", I18N("脚本目录为空(先用 gyscan esp upload 上传 .lua)",
+                              "No scripts yet (upload .lua via gyscan esp upload first)"));
+        return -1;
+    }
+
+    printf("\n%s:\n", I18N("可用 Lua 脚本", "Available Lua scripts"));
+    for (int i = 0; i < s_script_count; i++) {
+        printf("  [%d] %s\n", i + 1, s_script_names[i]);
+    }
+    printf("\n");
+
+    char input[16];
+    printf("%s", I18N("输入脚本编号并回车 (0 取消): ",
+                      "Enter script number and press Enter (0 = cancel): "));
+    if (menu_read_line(input, sizeof(input)) < 0) {   /* ESC 取消 */
+        printf("\n%s\n", i18n_t("已取消"));
+        return -1;
+    }
+    int num = atoi(input);
+    if (num >= 1 && num <= s_script_count) {
+        return num - 1;
+    }
+    if (num == 0) {
+        printf("%s\n", i18n_t("已取消"));
+        return -1;
+    }
+    printf("\n%s\n", i18n_t("无效的选择"));
+    return -1;
+}
+
+/* 运行脚本：Lua print 输出走 stdout，直接显示在串口终端 */
+static void action_lua_run(void)
+{
+    int idx = menu_pick_script();
+    if (idx < 0) {
+        return;
+    }
+
+    const char *name = s_script_names[idx];
+    printf("\n%s: %s\n", i18n_t("正在运行脚本"), name);
+
+    /* out_cb=NULL：Lua print 输出默认落到串口 stdout（终端直接可见） */
+    char err[256];
+    esp_err_t r = script_execute(name, NULL, NULL, err, sizeof(err));
+    if (r == ESP_OK) {
+        printf("\n%s\n", i18n_t("脚本执行完成"));
+    } else {
+        printf("\n%s: %s\n", i18n_t("脚本执行失败"), err);
+    }
+}
+
+/* ---- TF 卡设置 ---- */
+
+static void action_sd_status(void)
+{
+    if (sdcard_is_mounted()) {
+        char st[64] = {0};
+        sdcard_status(st, sizeof(st));
+        printf("%s\n", I18N("--- TF 卡状态 ---", "--- TF Card Status ---"));
+        printf("%s: %s\n", i18n_t("挂载点"), SDCARD_MOUNT_POINT);
+        /* st = "mounted, X MB" -> 只展示容量部分 */
+        char *cap = strchr(st, ',');
+        printf("%s: %s\n", I18N("容量", "Capacity"),
+               cap ? cap + 2 : st);
+        printf("%s\n", I18N("已挂载", "Mounted"));
+    } else {
+        printf("%s\n", i18n_t("TF 卡状态"));
+        printf("%s\n", I18N("未挂载", "Not mounted"));
+    }
+    printf("%s", I18N("脚本存储介质: ", "Script storage: "));
+    printf("%s\n", (script_store_media() == SCRIPT_MEDIA_SDCARD)
+                       ? I18N("SD 卡 (/sdcard)", "SD card (/sdcard)")
+                       : I18N("内部 Flash (/spiffs)", "Internal Flash (/spiffs)"));
+    if (!sdcard_is_mounted()) {
+        printf("%s\n", I18N("提示: 选择\"挂载 TF 卡\"后即可把脚本存储切到 SD 卡",
+                            "Hint: mount the TF card first, then scripts can live on it"));
+    }
+}
+
+static void action_sd_mount(void)
+{
+    if (sdcard_is_mounted()) {
+        printf("%s\n", I18N("TF 卡已挂载", "TF card already mounted"));
+        return;
+    }
+    printf("%s\n", I18N("正在挂载 TF 卡...", "Mounting TF card..."));
+    esp_err_t r = sdcard_mount();
+    if (r == ESP_OK) {
+        printf("%s\n", I18N("TF 卡挂载成功", "TF card mounted successfully"));
+        /* 挂载成功后可提示切换存储介质 */
+        printf("%s\n", I18N("可在\"切换脚本存储介质\"中把脚本存储切换到 SD 卡",
+                            "You can switch script storage to SD card in 'Switch Script Media'"));
+    } else {
+        printf("%s\n", I18N("TF 卡挂载失败: 请检查接线/供电/卡是否插好",
+                            "Mount failed: check wiring/power/card"));
+    }
+}
+
+static void action_sd_unmount(void)
+{
+    if (!sdcard_is_mounted()) {
+        printf("%s\n", I18N("TF 卡未挂载", "TF card not mounted"));
+        return;
+    }
+    /* 若脚本存储正指向 SD 卡，先切回内部，避免后续操作落在已卸载介质 */
+    if (script_store_media() == SCRIPT_MEDIA_SDCARD) {
+        script_store_select_media(SCRIPT_MEDIA_INTERNAL);
+        printf("%s\n", I18N("已把脚本存储切回内部 Flash", "Script storage switched back to internal Flash"));
+    }
+    printf("%s\n", I18N("正在卸载 TF 卡...", "Unmounting TF card..."));
+    esp_err_t r = sdcard_unmount();
+    if (r == ESP_OK) {
+        printf("%s\n", I18N("TF 卡已安全卸载", "TF card unmounted"));
+    } else {
+        printf("%s: %s\n", I18N("卸载失败", "Unmount failed"),
+               esp_err_to_name(r));
+    }
+}
+
+static void action_sd_format(void)
+{
+    if (!sdcard_is_mounted()) {
+        printf("%s\n", I18N("请先挂载 TF 卡再格式化",
+                            "Mount the TF card first before formatting"));
+        return;
+    }
+    printf("\n%s\n", I18N("确认格式化 TF 卡? 将删除卡上所有数据! (y=格式化, ESC=取消)",
+                          "Format TF card? ALL data will be erased! (y=Format, ESC=Cancel)"));
+    while (1) {
+        int key = menu_wait_key();
+        if (key == 'y' || key == 'Y') {
+            break;
+        }
+        if (key == MENU_KEY_ESC || key == 'n' || key == 'N') {
+            printf("%s\n", i18n_t("已取消"));
+            return;
+        }
+    }
+    printf("%s\n", I18N("正在格式化...", "Formatting..."));
+    esp_err_t r = sdcard_format();
+    printf("%s\n", (r == ESP_OK)
+                       ? I18N("格式化完成", "Format complete")
+                       : I18N("格式化失败", "Format failed"));
+}
+
+static void action_sd_switch_media(void)
+{
+    if (script_store_media() == SCRIPT_MEDIA_SDCARD) {
+        esp_err_t r = script_store_select_media(SCRIPT_MEDIA_INTERNAL);
+        printf("%s (%s)\n",
+               (r == ESP_OK) ? I18N("脚本存储已切回: ", "Script storage set to: ")
+                             : I18N("切换失败: ", "Switch failed: "),
+               I18N("内部 Flash (/spiffs)", "Internal Flash (/spiffs)"));
+    } else {
+        if (!sdcard_is_mounted()) {
+            printf("%s\n", I18N("请先挂载 TF 卡，再切换脚本存储介质",
+                                "Mount the TF card first, then switch script storage"));
+            return;
+        }
+        esp_err_t r = script_store_select_media(SCRIPT_MEDIA_SDCARD);
+        printf("%s (%s)\n",
+               (r == ESP_OK) ? I18N("脚本存储已切换: ", "Script storage set to: ")
+                             : I18N("切换失败: ", "Switch failed: "),
+               I18N("SD 卡 (/sdcard)", "SD card (/sdcard)"));
+    }
+}
+
+/* ---- Lua 包管理 ---- */
+
+void action_lua_rock_list(void)
+{
+    lua_rock_package_info_t infos[LUA_SCRIPT_LIST_MAX];
+    int count = 0;
+    esp_err_t r = lua_rock_list(infos, LUA_SCRIPT_LIST_MAX, &count);
+    if (r != ESP_OK || count == 0) {
+        printf("\n%s\n", I18N("未安装任何 Lua 包", "No Lua packages installed"));
+        return;
+    }
+
+    printf("\n%s:\n", I18N("已安装的 Lua 包", "Installed Lua packages"));
+    for (int i = 0; i < count; i++) {
+        printf("  [%d] %s (版本: %s)\n", i + 1, infos[i].name, infos[i].version);
+    }
+    printf("\n");
+}
+
+void action_lua_rock_install(void)
+{
+    char name[LUA_SCRIPT_NAME_MAX];
+    char version[LUA_ROCK_MAX_VERSION];
+
+    printf("%s", I18N("输入包名: ", "Enter package name: "));
+    if (menu_read_line(name, sizeof(name)) < 0 || name[0] == '\0') {
+        printf("%s\n", i18n_t("已取消"));
+        return;
+    }
+
+    printf("输入版本(直接回车表示 latest): ");
+    if (menu_read_line(version, sizeof(version)) < 0) {
+        printf("%s\n", i18n_t("已取消"));
+        return;
+    }
+
+    esp_err_t r = lua_rock_install(name, version[0] == '\0' ? NULL : version);
+    if (r == ESP_OK) {
+        printf("%s: %s\n", I18N("包安装成功", "Package installed"), name);
+    } else {
+        printf("%s: %s\n", I18N("包安装失败", "Package install failed"), esp_err_to_name(r));
+    }
+}
+
+void action_lua_rock_remove(void)
+{
+    char name[LUA_SCRIPT_NAME_MAX];
+
+    printf("%s", I18N("输入要移除的包名: ", "Enter package name to remove: "));
+    if (menu_read_line(name, sizeof(name)) < 0 || name[0] == '\0') {
+        printf("%s\n", i18n_t("已取消"));
+        return;
+    }
+
+    esp_err_t r = lua_rock_remove(name);
+    if (r == ESP_OK) {
+        printf("%s: %s\n", I18N("包已移除", "Package removed"), name);
+    } else {
+        printf("%s: %s\n", I18N("移除失败", "Remove failed"), esp_err_to_name(r));
+    /* Lua 包屏幕 */
+static const menu_screen_t s_lua_rock_menu = {
+    vTaskDelay(pdMS_TO_TICKS(150));   /* 让串口输出发送完 */
+
+    ESP_LOGI(TAG, "进入深度睡眠(关机)。按 BOOT/EN 键唤醒重新运行。");
+
+    /* 按 BOOT(GPIO0, 默认上拉) 可唤醒；若接真实电源管理可在此关断供电 */
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+    esp_deep_sleep_start();            /* 不返回 */
+}
+
+/* 主要关机确认 */
+static void action_shutdown(void)
+{
+    printf("\n%s\n", I18N("确认关机? (回车=关机, ESC=继续运行)",
+                         "Confirm shutdown? (Enter=Shutdown, ESC=Cancel)"));
+    while (1) {
+        int key = menu_wait_key();
+        if (key == MENU_KEY_ENTER || key == '\n' || key == 'y' || key == 'Y') {
+            break;
+        }
+        if (key == MENU_KEY_ESC || key == 'n' || key == 'N') {
+            printf("%s\n", i18n_t("已取消"));
+            return;
+        }
+    }
+
+    printf("%s\n", i18n_t("正在关机..."));
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(150));   /* 让串口输出发送完 */
+
+    ESP_LOGI(TAG, "进入深度睡眠(关机)。按 BOOT/EN 键唤醒重新运行。");
+
+    /* 按 BOOT(GPIO0, 默认上拉) 可唤醒；若接真实电源管理可在此关断供电 */
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+    esp_deep_sleep_start();            /* 不返回 */
+}
+
+/* ---------------- 菜单结构（支持子菜单，ESC 返回上级） ---------------- */
+
+static const menu_screen_t s_wifi_menu;
+static const menu_screen_t s_bt_menu;
+static const menu_screen_t s_edge_menu;
+static const menu_screen_t s_keyboard_menu;
+static const menu_screen_t s_lang_menu;
+static const menu_screen_t s_sd_menu;
+
+/* 边缘安全：集中所有攻击/渗透测试工具 */
+static const menu_item_t s_edge_items[] = {
+    { "WiFi 探测",              NULL, action_wifi_scan },
+    { "蓝牙探测",               NULL, action_ble_scan },
+    { "键盘模拟输入",           &s_keyboard_menu, NULL },
+    { "连接 gyscan (Go程序)",    NULL, action_tcp_connect },
+};
+
+static const menu_screen_t s_edge_menu = {
+    "边缘安全",
+    s_edge_items,
+    sizeof(s_edge_items) / sizeof(s_edge_items[0]),
+};
+
+static const menu_item_t s_keyboard_items[] = {
+    { "注入测试文本",   NULL, action_hid_test },
+    { "USB 键盘状态",   NULL, action_hid_status },
+};
+
+static const menu_screen_t s_keyboard_menu = {
+    "键盘模拟",
+    s_keyboard_items,
+    sizeof(s_keyboard_items) / sizeof(s_keyboard_items[0]),
+};
+
+/* WiFi 设置 */
+static const menu_item_t s_wifi_items[] = {
+    { "连接 WiFi",              NULL, action_wifi_connect },
+    { "手动输入 SSID/密码",      NULL, action_wifi_setup },
+    { "断开 WiFi",              NULL, action_wifi_disconnect },
+    { "网络与 HTTP 状态",        NULL, action_http_status },
+    { "gyscan控制(1234)状态",    NULL, action_tcp_status2 },
+};
+
+static const menu_screen_t s_wifi_menu = {
+    "WiFi 设置",
+    s_wifi_items,
+    sizeof(s_wifi_items) / sizeof(s_wifi_items[0]),
+};
+
+/* 蓝牙设置 */
+static const menu_item_t s_bt_items[] = {
+    { "蓝牙配对",   NULL, action_ble_pair },
+};
+
+static const menu_screen_t s_bt_menu = {
+    "蓝牙设置",
+    s_bt_items,
+    sizeof(s_bt_items) / sizeof(s_bt_items[0]),
+};
+
+/* TF 卡设置 */
+static const menu_item_t s_sd_items[] = {
+    { "TF 卡状态",        NULL, action_sd_status },
+    { "挂载 TF 卡",       NULL, action_sd_mount },
+    { "卸载 TF 卡",       NULL, action_sd_unmount },
+    { "格式化 TF 卡",     NULL, action_sd_format },
+    { "切换脚本存储介质", NULL, action_sd_switch_media },
+};
+
+static const menu_screen_t s_sd_menu = {
+    "TF 卡设置",
+    s_sd_items,
+    sizeof(s_sd_items) / sizeof(s_sd_items[0]),
+};
+
+/* 语言切换 */
+static const menu_item_t s_lang_items[] = {
+    { "中文",    NULL, action_set_zh },
+    { "English", NULL, action_set_en },
+};
+
+static const menu_screen_t s_lang_menu = {
+    "语言",
+    s_lang_items,
+    sizeof(s_lang_items) / sizeof(s_lang_items[0]),
+};
+
+/* 主菜单：功能入口 + 语言切换 + 关机 */
+static const menu_item_t s_root_items[] = {
+    { "WiFi 设置",     &s_wifi_menu, NULL },
+    { "蓝牙设置",      &s_bt_menu,   NULL },
+    { "边缘安全",      &s_edge_menu, NULL },
+    { "运行 Lua 脚本", NULL,         action_lua_run },
+    { "Lua 包管理",    &s_lua_rock_menu, NULL },
+    { "TF 卡设置",     &s_sd_menu,   NULL },
+    { "语言",          &s_lang_menu, NULL },
+    { "关机",          NULL,         action_shutdown },
+};
+
+static const menu_screen_t s_root_menu = {
+    "主菜单",
+    s_root_items,
+    sizeof(s_root_items) / sizeof(s_root_items[0]),
+};
+
+/* 菜单运行在独立任务中，栈空间足够 WiFi/BLE/TCP 使用 */
+static void menu_task(void *arg)
+{
+    /* 顶级主菜单按 ESC/q → 关机确认 */
+    menu_set_exit_handler(action_shutdown);
+    menu_run(&s_root_menu);
+    vTaskDelete(NULL);
+}
+
+/* 后台初始化 USB HID 键盘：初始化耗时长(QEMU下会失败)，不阻塞开机 */
+static void hid_task(void *arg)
+{
+    esp_err_t r = hid_keyboard_init();
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "USB HID 键盘初始化失败(%s)，USB 键盘功能不可用",
+                 esp_err_to_name(r));
+    }
+    vTaskDelete(NULL);
+}
+
+/* WiFi 后台自动连接（阻塞型，独立任务；QEMU 中 WiFi 卡住也不影响其它网络） */
+static void wifi_auto_task(void *arg)
+{
+    int fail_count = 0;
+    while (1) {
+        if (wifi_is_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            continue;
+        }
+        esp_err_t err = wifi_sta_connect();
+        if (err == ESP_OK) {
+            fail_count = 0;
+            ESP_LOGI(TAG, "WiFi 已连接: %s", wifi_get_active_ssid());
+        } else if (err == ESP_ERR_NOT_SUPPORTED || err == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "当前平台不支持 WiFi");
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            continue;
+        } else {
+            fail_count++;
+            ESP_LOGW(TAG, "WiFi 连接失败(%s)", esp_err_to_name(err));
+        }
+        vTaskDelay(pdMS_TO_TICKS((fail_count >= 3) ? 30000 : 10000));
+    }
+    vTaskDelete(NULL);
+}
+
+/* 网络监视任务：WiFi 或 以太网(openeth/QEMU) 任一就绪即启动服务 */
+static void net_task(void *arg)
+{
+#if defined(CONFIG_ETH_USE_OPENETH)
+    ESP_LOGW(TAG, "并行启动 QEMU 以太网(openeth)...");
+    eth_start();
+#endif
+
+    xTaskCreate(wifi_auto_task, "wifi", 8192, NULL, 5, NULL);
+
+    while (1) {
+#if defined(CONFIG_ETH_USE_OPENETH)
+        /* QEMU 下 esp_event 事件循环可能不调度 IP_EVENT_ETH_GOT_IP，
+         * 因此除事件标志(eth_got_ip)外，再直接轮询 netif 上的 IP 兑底 */
+        if (eth_got_ip() || eth_has_ip()) {
+            ESP_LOGI(TAG, "以太网就绪，启动服务: HTTP(%d) + gyscan控制(%d)",
+                     CONFIG_GYSCAN_HTTP_PORT, CONFIG_GYSCAN_TCP_PORT);
+            http_server_start();
+            tcp_server_start();
+            break;
+        }
+#endif /* CONFIG_ETH_USE_OPENETH */
+        if (wifi_is_connected()) {
+            ESP_LOGI(TAG, "WiFi 就绪，启动服务: HTTP(%d) + gyscan控制(%d)",
+                     CONFIG_GYSCAN_HTTP_PORT, CONFIG_GYSCAN_TCP_PORT);
+            http_server_start();
+            tcp_server_start();
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    vTaskDelete(NULL);
+}
+
+void app_main(void)
+{
+    /* 初始化 NVS（WiFi/BLE 需要） */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    /* 脚本文件系统（ls/upload/download/run 需要） */
+    script_store_init();
+
+    /* USB HID 键盘设备（后台初始化，不阻塞启动；menuconfig 可关闭） */
+#ifdef CONFIG_GYSCAN_ENABLE_USB_HID
+    xTaskCreate(hid_task, "hid", 4096, NULL, 4, NULL);
+#endif
+
+    /* LED 闪烁作为运行指示（后台任务，QEMU 等无 RMT 环境自动跳过） */
+    xTaskCreate(led_task, "led", 2048, NULL, 4, NULL);
+
+    /* 自动连接 WiFi，成功后启动 HTTP 状态服务（无 WiFi 平台自动跳过） */
+    xTaskCreate(net_task, "net", 8192, NULL, 5, NULL);
+
+    /* 进入交互菜单 */
+    ESP_LOGI(TAG, "启动调试菜单...");
+    xTaskCreate(menu_task, "menu", 8192, NULL, 5, NULL);
+}
+
