@@ -324,7 +324,7 @@ local key = ssl.x509.read_embedded("server.key")
 | ------ | ------ | ---- |
 | WiFi SSID / 密码 | `MyWiFi` | 自动连接的 WiFi |
 | HTTP 服务器端口 | `80` | curl/wget/浏览器访问的端口 |
-| 远程控制 TCP 端口 | `1234` | 后期功能，暂未启用 |
+| 远程控制 TCP 端口 | `1234` | gyscan 控制服务端口（联网后自动启动） |
 | 蓝牙扫描时长 | `5000ms` | "蓝牙探测"持续时间 |
 
 ## 构建与烧录
@@ -334,6 +334,32 @@ local key = ssl.x509.read_embedded("server.key")
 idf.py set-target esp32s3
 
 # 2. （可选）配置 WiFi 等
+idf.py menuconfig
+
+# 3. 编译（注意：芯片 16MB，已按 8MB Flash 配置烧录）
+idf.py build
+
+# 4. 烧录并打开串口监视器（波特率 115200）
+idf.py -p /dev/ttyUSB0 flash monitor
+```
+
+> 退出串口监视器：`Ctrl+]`
+
+## Flash 说明
+
+- 芯片：**16MB** Flash
+- 烧录配置：**8MB**（`CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y`）
+- 分区表：自定义（nvs + phy_init + **4MB app**），见 `partitions.csv`
+
+## LED 引脚说明
+
+| 开发板 | LED | GPIO |
+| ------ | --- | ---- |
+| ESP32-S3-DevKitC-1 v1.0 | WS2812 RGB | GPIO48 |
+| ESP32-S3-DevKitC-1 v1.1+ | WS2812 RGB | GPIO38 |
+| 自接普通 LED | GPIO 电平 | 任意空闲 GPIO |
+
+如需使用普通 GPIO LED，在 `idf.py menuconfig` → **Blink Configuration** → 将 LED 类型改为 `GPIO`，并修改 GPIO 号。
 
 ### Lua 内置 pcap 库（WiFi 混杂模式抓包）
 
@@ -355,7 +381,7 @@ for i = 1, 10 do
   if not f then print("timeout"); break end
   -- f = { data, src, dst, ethertype, timestamp, length, rssi }
   print(string.format("[%u] %s -> %s eth=0x%04x len=%u rssi=%d",
-        f.timestamp, f.src, f.dst, fethertype, f.length, f.rssi))
+        f.timestamp, f.src, f.dst, f.ethertype, f.length, f.rssi))
 end
 
 pcap.close(h)
@@ -444,34 +470,6 @@ ble.disconnect()
 - 扫描/配对期间阻塞 Lua 协程（`xSemaphoreTake`），不占用额外任务栈
 - 地址解析支持 `aa:bb:cc:dd:ee:ff` 冒号分隔格式，自动识别为随机地址类型
 
-
-idf.py menuconfig
-
-# 3. 编译（注意：芯片 16MB，已按 8MB Flash 配置烧录）
-idf.py build
-
-# 4. 烧录并打开串口监视器（波特率 115200）
-idf.py -p /dev/ttyUSB0 flash monitor
-```
-
-> 退出串口监视器：`Ctrl+]`
-
-## Flash 说明
-
-- 芯片：**16MB** Flash
-- 烧录配置：**8MB**（`CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y`）
-- 分区表：自定义（nvs + phy_init + **4MB app**），见 `partitions.csv`
-
-## LED 引脚说明
-
-| 开发板 | LED | GPIO |
-| ------ | --- | ---- |
-| ESP32-S3-DevKitC-1 v1.0 | WS2812 RGB | GPIO48 |
-| ESP32-S3-DevKitC-1 v1.1+ | WS2812 RGB | GPIO38 |
-| 自接普通 LED | GPIO 电平 | 任意空闲 GPIO |
-
-如需使用普通 GPIO LED，在 `idf.py menuconfig` → **Blink Configuration** → 将 LED 类型改为 `GPIO`，并修改 GPIO 号。
-
 ## 项目结构
 
 ```
@@ -486,7 +484,7 @@ espgyscan/
 ├── components/lua/         # Lua 引擎 IDF 组件（lua_embed.c / include/）
 ├── third_party/lua/        # Lua 5.4.7 官方源码（纯 C，静态编译进固件）
 ├── src/                    # 【全部固件源码】
-│   ├── espgyscan.c         # 主程序：主菜单 + 后台任务
+│   ├── app/espgyscan.c     # 主程序：主菜单 + 后台任务
 │   ├── menu.c / menu.h     # 菜单框架（WASD/方向键/ESC/Enter、多级菜单、行输入）
 │   ├── i18n.c / i18n.h     # 界面国际化（中/英）
 │   ├── wifi_scan.c / .h    # WiFi 连接/运行时SSID配置/断开/状态
@@ -499,8 +497,6 @@ espgyscan/
 │   ├── lua/lua_net.c / .h  # 内置 Lua net 模块(HTTP/HTTPS/DNS/TCP, 无需 luarocks)
 │   ├── lua/lua_pcap.c / .h  # 内置 Lua pcap 模块(WiFi 混杂模式抓包, 无需 libpcap)
 │   ├── lua/lua_ble.c / .h   # 内置 Lua BLE 模块(NimBLE 扫描/配对, 无需 luarocks)
-│   ├── net_scan.c / .h     # 网段/端口扫描
-│   ├── net_scan.c / .h     # 网段/端口扫描
 │   ├── net_scan.c / .h     # 网段/端口扫描
 │   └── arp_mitm.c / .h     # ARP 中间人(ARP MITM)攻击
 ├── freeclient/             # gyscan 主程序(Go, cobra CLI)
