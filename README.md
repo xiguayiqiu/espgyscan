@@ -6,10 +6,10 @@
 
 启动后串口显示欢迎信息与交互式菜单（`>` 为选择器，支持**多级子菜单**）：
 
-```
+```text
 ----- 欢迎使用esp-gyscan----
 内存：xxx KB / xxx KB
-储存(Flash)：16 MB
+储存(Flash)：8 MB        ← 自动探测：N8R8=8MB，N16R8=16MB
 ---- 主菜单----
 > WiFi 设置
   蓝牙设置
@@ -18,6 +18,8 @@
   TF 卡设置
   语言
 ```
+
+> 说明：下文终端示例中 `192.168.1.5`、容量数值等为示意，实际以设备为准。
 
 主菜单入口如下（功能入口 + 语言切换 + 关机）：
 
@@ -327,29 +329,55 @@ local key = ssl.x509.read_embedded("server.key")
 | 远程控制 TCP 端口 | `1234` | gyscan 控制服务端口（联网后自动启动） |
 | 蓝牙扫描时长 | `5000ms` | "蓝牙探测"持续时间 |
 
+## Flash 版本（N8R8 / N16R8）
+
+本固件适配 ESP32-S3 的两个芯片型号，编译时用 **`tools/build.sh`** 选择版本即可：
+
+| 版本 | 芯片型号 | Flash | PSRAM | 构建目录 | 分区表 |
+| ---- | ---- | ---- | ---- | ---- | ---- |
+| `8m`（默认） | **N8R8** | 8MB | 8MB（八线 OPI） | `build-8m/` | `partitions.csv` |
+| `16m` | **N16R8** | 16MB | 8MB（八线 OPI） | `build-16m/` | `partitions_16m.csv` |
+
+- 两个版本的 sdkconfig 分别存放在 `build-8m/sdkconfig` 与 `build-16m/sdkconfig`，**互不干扰**；
+  公共配置见 `sdkconfig.defaults`，16M 差异见 `sdkconfig.defaults.16m`
+  （Flash 大小 → `CONFIG_ESPTOOLPY_FLASHSIZE_16MB`、分区表 → `partitions_16m.csv`）。
+- 两版均默认启用 **8MB 八线 PSRAM**（`CONFIG_SPIRAM_MODE_OCT` + `SPIRAM_SPEED_80M`）；
+  运行在无 PSRAM 的板子上时因 `CONFIG_SPIRAM_IGNORE_NOTFOUND=y` 不会 panic，仅回退内部 RAM。
+- 分区表中 `storage`(spiffs) 分区**仅供 QEMU 模拟使用**；真机固件从不挂载/写入该分区。
+
 ## 构建与烧录
 
 ```bash
-# 1. 设置目标芯片（首次）
-idf.py set-target esp32s3
+# N8R8（Flash 8MB，默认）
+./tools/build.sh                    # 构建（等价 build 8m）
+./tools/build.sh 8m flash           # 构建并烧录
+./tools/build.sh 8m flash monitor   # 构建 + 烧录 + 串口监视(115200)
 
-# 2. （可选）配置 WiFi 等
-idf.py menuconfig
-
-# 3. 编译（注意：芯片 16MB，已按 8MB Flash 配置烧录）
-idf.py build
-
-# 4. 烧录并打开串口监视器（波特率 115200）
-idf.py -p /dev/ttyUSB0 flash monitor
+# N16R8（Flash 16MB）
+./tools/build.sh 16m                # 构建
+./tools/build.sh 16m flash          # 构建并烧录
+./tools/build.sh 16m flash monitor
 ```
 
-> 退出串口监视器：`Ctrl+]`
+> - 每次调用自动选择对应的 `-DSDKCONFIG_DEFAULTS` 与构建目录；切换版本只需换
+>   `8m`/`16m` 参数，无需删除任何配置。
+> - 也可绕过脚本直接用 idf.py：加 `-B build-16m -DSDKCONFIG=build-16m/sdkconfig
+>   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.16m"` 即等价于 16m。
+> - 退出串口监视器：`Ctrl+]`
+> - 若想改 WiFi/密码/端口等，先构建一次生成 sdkconfig，再
+>   `./tools/build.sh 8m menuconfig`（或 `16m menuconfig`）后重新构建。
 
 ## Flash 说明
 
-- 芯片：**16MB** Flash
-- 烧录配置：**8MB**（`CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y`）
-- 分区表：自定义（nvs + phy_init + **4MB app**），见 `partitions.csv`
+- **N8R8**：Flash 8MB，烧录参数 `--flash-size 8MB`，分区表 `partitions.csv`
+- **N16R8**：Flash 16MB，烧录参数 `--flash-size 16MB`，分区表 `partitions_16m.csv`
+- 两版共用布局：nvs + phy_init + **4MB app**(factory) + storage(spiffs，QEMU 用)
+  - 8MB 版 storage 512KB；16MB 版 storage 8MB
+- 主菜单“储存(Flash)”实时读取芯片实际大小（`esp_flash_get_size`），无需硬编码
+
+> **存储策略（真机）**：固件**不在内部 Flash 写文件**。脚本/文件存储自动选择：
+> 有 TF 卡并已挂载 → 写入 TF 卡 `/sdcard`；无 TF 卡 → 只存**内存 RAM**（重启清空）。
+> `storage` 分区仅保留在分区表中供 QEMU 模拟环境使用，真机代码不会挂载 SPIFFS。
 
 ## LED 引脚说明
 
@@ -475,8 +503,12 @@ ble.disconnect()
 ```
 espgyscan/
 ├── CMakeLists.txt          # 顶层 CMake
-├── partitions.csv          # 自定义分区表（8MB / 4MB app + storage）
-├── sdkconfig.defaults      # 默认配置（目标芯片、蓝牙、Flash、TinyUSB 等）
+├── partitions.csv          # 分区表 8MB(N8R8)：nvs + phy + 4MB app + storage
+├── partitions_16m.csv      # 分区表 16MB(N16R8)：同上但 storage 扩至 8MB
+├── sdkconfig.defaults      # 默认配置（目标芯片、蓝牙、Flash 8M、PSRAM、TinyUSB）
+├── sdkconfig.defaults.16m  # 16M(N16R8) 覆盖：Flash 16MB + partitions_16m.csv
+├── tools/
+│   └── build.sh            # 一键选择 Flash 版本编译/烧录：8m | 16m
 ├── main/                   # ESP-IDF main 组件（仅构建配置）
 │   ├── CMakeLists.txt      # 引用 ../src 源码
 │   ├── Kconfig.projbuild   # menuconfig 选项定义
@@ -500,19 +532,17 @@ espgyscan/
 │   ├── net_scan.c / .h     # 网段/端口扫描
 │   └── arp_mitm.c / .h     # ARP 中间人(ARP MITM)攻击
 ├── freeclient/             # gyscan 主程序(Go, cobra CLI)
-├── tools/
-│   └── gyscan_client.go    # Go 远程控制客户端（后期 1234 端口使用）
 └── .gitignore
 ```
 
 ### 主菜单（国际化 + 状态总览）
 
-```
+```text
 ----- 欢迎使用esp-gyscan----     ← 顶部实时显示
 网络：已连接 MyWiFi (192.168.1.5)
 蓝牙：BLE 已就绪
 内存：xxx KB / xxx KB
-储存(Flash)：16 MB
+储存(Flash)：8 MB              ← N8R8=8MB，N16R8=16MB(自动探测)
 ---- 主菜单----
 > WiFi 设置
   蓝牙设置
@@ -538,10 +568,13 @@ espgyscan/
 
 ## QEMU 环境（无硬件调试）
 
-可用 `idf.py qemu monitor` 在 QEMU 中运行本固件，主要用于测试**菜单交互**：
+可用 QEMU 运行本固件，主要用于测试**菜单交互**与 gyscan 控制协议
+（QEMU 按 8MB/N8R8 布局模拟；TF 卡不可用时文件存储走内存 RAM，若启用
+`CONFIG_ETH_USE_OPENETH` 场景需要模拟持久化，可把文件放到分区表的
+`storage`(spiffs) 分区）：
 
 ```bash
-idf.py qemu monitor     # 首次会自动构建并生成 qemu_flash.bin
+./tools/build.sh 8m qemu monitor     # 构建(8m) + QEMU monitor
 ```
 
 QEMU 模拟限制说明（固件已做容错，不影响菜单运行）：
@@ -569,14 +602,14 @@ idf.py menuconfig
 #   → Component config → Ethernet → Support OpenCores Ethernet MAC (for use with QEMU)  ☑
 #   （等效：sdkconfig 写入/移除 CONFIG_ETH_USE_OPENETH=y）
 
-# 2) 构建 + 带网卡与端口转发启动（推荐：idf.py qemu 直接带转发）
-idf.py build
-idf.py qemu monitor --qemu-extra-args="-nic user,model=open_eth,hostfwd=tcp::1234-:1234,hostfwd=tcp::8080-:80"
+# 2) 构建 + 带网卡与端口转发启动（推荐：tools/build.sh 8m qemu 直接带转发）
+#    QEMU 使用 8MB(N8R8) 布局(build-8m)；真机请勿开启 openeth
+./tools/build.sh 8m qemu --qemu-extra-args="-nic user,model=open_eth,hostfwd=tcp::1234-:1234,hostfwd=tcp::8080-:80"
 
 # 3) 或手动启动 QEMU
 QEMU=~/.espressif/tools/qemu-xtensa/*/qemu/bin/qemu-system-xtensa
 $QEMU -M esp32s3 -m 32M \
-  -drive file=build/qemu_flash.bin,if=mtd,format=raw \
+  -drive file=build-8m/qemu_flash.bin,if=mtd,format=raw \
   -global driver=timer.esp32s3.timg,property=wdt_disable,value=true \
   -nic user,model=open_eth,hostfwd=tcp::1234-:1234,hostfwd=tcp::8080-:80 \
   -nographic -serial tcp::5555,server

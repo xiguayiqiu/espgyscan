@@ -12,8 +12,21 @@ CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# Flash 大小：芯片物理 16MB，按 8MB 配置烧录运行
+# ---- Flash 版本选择（N8R8 / N16R8 两个芯片型号）----
+# 本文件默认 = 8MB Flash 版本（N8R8）。
+# 16MB Flash 版本（N16R8）请改用 16m 预设构建：
+#   ./tools/build.sh 16m
+#   （等价于 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.16m"
+#      -B build-16m build，其中 sdkconfig.defaults.16m 覆盖为
+#      CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y + partitions_16m.csv）
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# ---- PSRAM（N8R8 / N16R8 均板载 8MB 八线 OPI PSRAM）----
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# 无 PSRAM 的板(如 QEMU/无 R8 型号)启动时不 panic，仅回退到内部 RAM
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # TinyUSB：1 个 HID 接口（USB 键盘设备）
 CONFIG_TINYUSB_HID_COUNT=1
@@ -37,9 +50,4 @@ CONFIG_BLINK_PERIOD=1000
 # CONFIG_GYSCAN_WIFI_PASSWORD=""
 # CONFIG_GYSCAN_SERVER_HOST="192.168.1.100"
 # CONFIG_GYSCAN_SERVER_PORT=8080
-
-# 可选：若板载 PSRAM（如 N8R8/N16R8 型号），取消注释启用
-# CONFIG_SPIRAM=y
-# CONFIG_SPIRAM_MODE_OCT=y
-# CONFIG_SPIRAM_SPEED_80M=y
 

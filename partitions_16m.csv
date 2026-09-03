@@ -1,0 +1,9 @@
+# 自定义分区表（16MB Flash 布局 = N16R8 版本）
+# 蓝牙 + USB HID + TCP 服务器固件体积较大，app 分区设为 4MB(与 8MB 版一致)
+# 真机文件存储走 TF 卡(无卡则内存 RAM)，本表 storage(spiffs) 仅供 QEMU 模拟使用
+# 8MB Flash(N8R8) 布局见 partitions.csv
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  4M,
+storage,  data, spiffs,  0x410000, 0x800000,

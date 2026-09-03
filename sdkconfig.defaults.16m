@@ -1,0 +1,14 @@
+# ============================================================
+# 16MB Flash 版本预设（N16R8，Flash 16MB + 8MB OPI PSRAM）
+# ============================================================
+# 构建时作为 sdkconfig.defaults 的追加覆盖文件：
+#   ./tools/build.sh 16m
+#   或 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.16m"
+#            -B build-16m build
+# （公共配置仍来自 sdkconfig.defaults：蓝牙/PSRAM/TinyUSB 等）
+
+# Flash 大小：16MB（N16R8）。choice 互斥，自动取代上面的 8MB
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# 分区表：16MB 布局（storage 分区扩大至 8MB，供 QEMU 模拟使用）
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16m.csv"

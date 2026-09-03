@@ -1,6 +1,7 @@
 # ESP-IDF 构建产物
 freeclient/
 build/
+build-*/
 sdkconfig
 sdkconfig.old
 managed_components/
@@ -20,5 +21,6 @@ third_party/
 # IDE / 编辑器
 .vscode/
 .idea/
+.obsidian/
 *.swp
 *.swl

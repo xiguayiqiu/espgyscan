@@ -109,11 +109,12 @@ menu "gyscan Configuration"
             环境可关闭本选项，避免初始化报错。
 
     config GYSCAN_TCP_PORT
-        int "远程控制 TCP 端口(后期功能，暂未启用)"
+        int "远程控制 TCP 端口"
         range 1 65535
         default 1234
         help
-            后期版本将在此端口提供远程控制服务器，当前版本未启用。
+            gyscan 控制服务监听端口。设备联网后自动启动该 TCP 服务器，
+            供 gyscan(freeclient) / adb 风格的设备管理命令连接。
 
     config GYSCAN_HTTP_PORT
         int "HTTP 服务器端口"
